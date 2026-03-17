@@ -4,7 +4,17 @@ A Python tool that strips sensitive data from MongoDB log files while preserving
 
 Supports **all MongoDB deployment types**: standalone, replica set, and sharded cluster (including mongos, config servers, shard servers, and balancer operations).
 
-Processes **multiple log files at once** with a single shared mapping, guaranteeing coherent obfuscation across an entire cluster. The same hostname, shard name, or database name gets the same replacement in every file.
+## Coherent Obfuscation Across the Entire Cluster
+
+The tool processes **all log files at once** using a **single shared mapping**, guaranteeing that the obfuscation is **coherent** across every file in the cluster:
+
+- If `mongo-prod-01.acmecorp.com` appears in the primary's log, a secondary's log, and the mongos log, it becomes `host1.example.com` **in all three files**.
+- If `shard-east-01` is referenced by the balancer on the config server and by the migration coordinator on the shard, it becomes `shard1` **everywhere**.
+- The same database name, collection name, replica set name, IP address, username, or any other sensitive value always maps to the **exact same replacement** regardless of which log file it appears in.
+
+This means you can still correlate events across nodes, trace replication chains, and follow chunk migrations in the obfuscated output — the relationships between nodes are preserved, only the real names are gone.
+
+**How it works**: Pass 1 scans **all** input files into one shared registry before any replacement happens. Pass 2 applies that single registry to every file. No file is replaced until every file has been scanned.
 
 ## Table of Contents
 
