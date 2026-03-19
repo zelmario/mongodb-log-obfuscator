@@ -1,32 +1,31 @@
-# MongoDB Log Obfuscator
+# MongoDB Obfuscator
 
-A Python tool that strips sensitive data from MongoDB log files while preserving log structure and analytical value. Produces obfuscated logs safe for sharing with support teams, vendors, or public bug reports, plus a private mapping file to decode values when needed.
+A Python tool that strips sensitive data from MongoDB **log files** and **FTDC diagnostic files** while preserving structure and analytical value. Produces obfuscated output safe for sharing with support teams, vendors, or public bug reports, plus a private mapping file to decode values when needed.
 
 Supports **all MongoDB deployment types**: standalone, replica set, and sharded cluster (including mongos, config servers, shard servers, and balancer operations).
 
-## Coherent Obfuscation Across the Entire Cluster
+## Coherent Obfuscation Across Logs and FTDC
 
-The tool processes **all log files at once** using a **single shared mapping**, guaranteeing that the obfuscation is **coherent** across every file in the cluster:
+The tool processes **all files at once** — logs and FTDC alike — using a **single shared mapping**, guaranteeing that the obfuscation is **coherent** across every file:
 
-- If `mongo-prod-01.acmecorp.com` appears in the primary's log, a secondary's log, and the mongos log, it becomes `host1.example.com` **in all three files**.
+- If `mongo-prod-01.acmecorp.com` appears in the primary's log, a secondary's log, and an FTDC `serverStatus` reference document, it becomes `host1.example.com` **in all of them**.
 - If `shard-east-01` is referenced by the balancer on the config server and by the migration coordinator on the shard, it becomes `shard1` **everywhere**.
-- The same database name, collection name, replica set name, IP address, username, or any other sensitive value always maps to the **exact same replacement** regardless of which log file it appears in.
+- The same database name, collection name, replica set name, IP address, username, or any other sensitive value always maps to the **exact same replacement** regardless of which file or file type it appears in.
 
 This means you can still correlate events across nodes, trace replication chains, and follow chunk migrations in the obfuscated output — the relationships between nodes are preserved, only the real names are gone.
 
-**How it works**: Pass 1 scans **all** input files into one shared registry before any replacement happens. Pass 2 applies that single registry to every file. No file is replaced until every file has been scanned.
+**How it works**: Pass 1 scans **all** input files (logs line-by-line, FTDC via BSON decoding and metric chunk decompression) into one shared registry before any replacement happens. Pass 2 applies that single registry to every file. No file is replaced until every file has been scanned.
 
 ## Table of Contents
 
 - [Quick Start](#quick-start)
 - [Usage](#usage)
-  - [Single File](#single-file)
-  - [Multiple Files (Cluster)](#multiple-files-cluster)
-  - [Directory Input](#directory-input)
-  - [Glob Patterns](#glob-patterns)
+  - [Directory Input (Recommended)](#directory-input-recommended)
   - [Custom Output](#custom-output)
+  - [Load Existing Mapping](#load-existing-mapping)
   - [Command Reference](#command-reference)
 - [Output Files](#output-files)
+- [FTDC Support](#ftdc-support)
 - [How It Works](#how-it-works)
 - [Cross-File Coherence](#cross-file-coherence)
 - [What Gets Obfuscated](#what-gets-obfuscated)
@@ -45,24 +44,14 @@ This means you can still correlate events across nodes, trace replication chains
 ## Quick Start
 
 ```bash
-# Single file
-python3 mongodb_log_obfuscator.py mongod.log
+# Point at a support bundle / cluster dump folder — it does the rest
+python3 mongodb_obfuscator.py /path/to/CS0059344/
 
-# Entire replica set (3 nodes)
-python3 mongodb_log_obfuscator.py node1.log node2.log node3.log
-
-# All logs in a directory
-python3 mongodb_log_obfuscator.py /path/to/cluster_logs/
-
-# Full sharded cluster with custom output
-python3 mongodb_log_obfuscator.py \
-    mongos.log \
-    config1.log config2.log config3.log \
-    shard1_node1.log shard1_node2.log shard1_node3.log \
-    shard2_node1.log shard2_node2.log shard2_node3.log \
-    -o /sanitized/ \
-    -m /sanitized/cluster_mapping.json
+# Custom output directory
+python3 mongodb_obfuscator.py /path/to/cluster_dump/ -o /sanitized/
 ```
+
+The tool recursively scans the input directory for `.log` files and FTDC files (anything inside `diagnostic.data/` directories), obfuscates everything with a shared mapping, and writes the output to an `obfuscated/` subdirectory inside the input, preserving the original directory structure.
 
 ### Requirements
 
@@ -73,107 +62,159 @@ python3 mongodb_log_obfuscator.py \
 
 ## Usage
 
-### Single File
+### Directory Input (Recommended)
+
+Point at the root of a support bundle or cluster dump. The tool recursively finds all log and FTDC files:
 
 ```bash
-python3 mongodb_log_obfuscator.py mongod.log
+python3 mongodb_obfuscator.py /path/to/CS0059344/
 ```
 
-Produces:
-- `mongod_obfuscated.log` (in the same directory as the input)
-- `cluster_mapping.json` (in the same directory as the input)
-
-### Multiple Files (Cluster)
-
-Pass all log files from all nodes as arguments. Every file is scanned first, then all files are replaced using one shared mapping:
-
-```bash
-# 3-node replica set
-python3 mongodb_log_obfuscator.py primary.log secondary1.log secondary2.log
-
-# 10-node sharded cluster: mongos + 3 config servers + 2 shards x 3 nodes
-python3 mongodb_log_obfuscator.py \
-    mongos.log \
-    cfg1.log cfg2.log cfg3.log \
-    sh1_n1.log sh1_n2.log sh1_n3.log \
-    sh2_n1.log sh2_n2.log sh2_n3.log
+Input structure:
+```
+CS0059344/
+    mongod-0.log
+    diagnostic.data/
+        diagnostic.data/
+            metrics.2025-12-10T02-44-05Z-00000
+            metrics.2025-12-10T08-41-34Z-00000
+            metrics.interim
 ```
 
-### Directory Input
-
-Point to a directory and it will pick up all `*.log` files inside:
-
-```bash
-# Collects all .log files in the directory (non-recursive)
-python3 mongodb_log_obfuscator.py /var/log/mongodb/
+Output (inside `obfuscated/` subdirectory, originals untouched):
+```
+CS0059344/
+    mongod-0.log                          <-- original, untouched
+    diagnostic.data/                      <-- original, untouched
+        ...
+    obfuscated/                           <-- all obfuscated output here
+        mongod-0_obfuscated.log
+        diagnostic.data/
+            diagnostic.data/
+                metrics.2025-12-10T02-44-05Z-00000
+                metrics.2025-12-10T08-41-34Z-00000
+                metrics.interim
+        cluster_mapping.json
 ```
 
-You can mix directories and individual files:
+You can also pass multiple directories, individual files, or glob patterns:
 
 ```bash
-python3 mongodb_log_obfuscator.py /logs/shards/ /logs/config/ /logs/mongos.log
-```
+# Multiple directories (e.g., multi-node cluster)
+python3 mongodb_obfuscator.py /dumps/node1/ /dumps/node2/ /dumps/node3/
 
-### Glob Patterns
+# Mix of files and directories
+python3 mongodb_obfuscator.py /dumps/shards/ /dumps/config/ /dumps/mongos.log
 
-Shell globs work as expected:
-
-```bash
-python3 mongodb_log_obfuscator.py /logs/shard*.log /logs/config*.log /logs/mongos.log
+# Glob patterns
+python3 mongodb_obfuscator.py /dumps/node*/mongod.log /dumps/node*/diagnostic.data/
 ```
 
 ### Custom Output
 
 ```bash
-# Custom output directory (created automatically if it doesn't exist)
-python3 mongodb_log_obfuscator.py /logs/ -o /sanitized/
+# Custom output directory
+python3 mongodb_obfuscator.py /dumps/cluster/ -o /sanitized/
 
 # Custom mapping file path
-python3 mongodb_log_obfuscator.py /logs/ -o /sanitized/ -m /sanitized/my_mapping.json
+python3 mongodb_obfuscator.py /dumps/cluster/ -o /sanitized/ -m /sanitized/my_mapping.json
+```
+
+### Load Existing Mapping
+
+Continue a prior obfuscation run or merge with another pass:
+
+```bash
+# Load a mapping from a previous run to maintain coherence
+python3 mongodb_obfuscator.py /dumps/node4/ --load-mapping /sanitized/cluster_mapping.json -o /sanitized/node4/
 ```
 
 ### Command Reference
 
 ```
-usage: mongodb_log_obfuscator.py [-h] [-o OUTPUT_DIR] [-m MAPPING] input [input ...]
+usage: mongodb_obfuscator.py [-h] [-o OUTPUT_DIR] [-m MAPPING]
+                             [--load-mapping LOAD_MAPPING]
+                             input [input ...]
 
-Obfuscate sensitive data in MongoDB log files with consistent replacements
-across an entire cluster.
+Obfuscate sensitive data in MongoDB log files and FTDC diagnostic files with
+coherent, consistent replacements across an entire cluster. Recreates the
+input directory structure in the output.
 
 positional arguments:
-  input                 One or more log files, directories, or glob patterns.
-                        Directories are scanned for *.log files.
+  input                 One or more directories, log files, FTDC files, or
+                        glob patterns. Directories are scanned recursively
+                        for *.log files and diagnostic.data/ FTDC files.
 
 optional arguments:
   -h, --help            show this help message and exit
   -o OUTPUT_DIR, --output-dir OUTPUT_DIR
-                        Directory for obfuscated output files
-                        (default: same directory as first input file)
+                        Root directory for obfuscated output
+                        (default: <input>/obfuscated/)
   -m MAPPING, --mapping MAPPING
                         Path for the shared mapping JSON file
                         (default: <output-dir>/cluster_mapping.json)
+  --load-mapping LOAD_MAPPING
+                        Load an existing mapping to continue a prior run
+                        or merge with another obfuscation pass
 ```
 
 ---
 
 ## Output Files
 
-For each input file `<name>.log`, the tool produces `<name>_obfuscated.log` in the output directory. One shared `cluster_mapping.json` is produced for all files.
-
 | File | Purpose | Share? |
 |------|---------|--------|
 | `*_obfuscated.log` | Sanitized log — same format as input, all sensitive values replaced | Safe to share |
+| FTDC `metrics.*` | Sanitized FTDC — same binary format, all sensitive strings replaced, all numeric metrics preserved exactly | Safe to share |
 | `cluster_mapping.json` | Original-to-replacement lookup for all files, grouped by category | **Keep private** |
 
-Example output structure for a 3-node replica set:
+---
 
-```
-/sanitized/
-    node1_obfuscated.log
-    node2_obfuscated.log
-    node3_obfuscated.log
-    cluster_mapping.json      <-- one mapping for all three
-```
+## FTDC Support
+
+The tool includes a **pure-Python BSON codec** and **FTDC chunk decompressor/recompressor** to handle MongoDB's Full Time Diagnostic Data Capture files with zero external dependencies.
+
+### What happens to FTDC files
+
+FTDC files contain three document types:
+
+| Type | Name | Processing |
+|------|------|------------|
+| 0 | **Metadata** | Full BSON document (e.g., `serverStatus` output). All sensitive string fields are obfuscated. |
+| 1 | **Metric Chunk** | Compressed reference BSON + delta-encoded numeric time series. The reference document's strings are obfuscated; the **numeric delta stream is preserved byte-for-byte**. All metric data is intact. |
+| 2 | **Periodic Metadata** | Configuration change deltas. String fields are obfuscated. |
+
+### How metric chunks are processed
+
+1. Decompress the zlib payload
+2. Extract the reference BSON document and the delta stream
+3. Obfuscate sensitive strings in the reference document
+4. Re-compress with the **identical delta stream** — numeric metrics are untouched
+
+This works because FTDC's delta compression only tracks numeric fields. String fields exist solely in the reference document, so modifying strings and keeping the delta stream byte-for-byte is safe.
+
+### FTDC-specific keys
+
+In addition to the 130+ log attribute keys, the tool recognizes FTDC-specific fields:
+
+- `me` — the node's own host:port in `serverStatus` repl section
+- `set` — replica set name in `replSetGetStatus`
+- `hosts`, `passives`, `arbiters` — BSON arrays of host:port strings in replication sections
+- `advisoryHostFQDNs` — array of advisory FQDNs
+- `name` in `members[]` arrays — host:port of replica set members
+
+### File detection
+
+Files are automatically classified:
+
+| Pattern | Classification |
+|---------|---------------|
+| `*.log` | Log file |
+| Files inside `diagnostic.data/` directories | FTDC |
+| `metrics.*` or `metrics` filename | FTDC |
+| `*.ftdc` extension | FTDC |
+| Binary content (null bytes in header) | FTDC |
+| Archive files (`.tar.gz`, `.zip`, etc.) | Skipped |
 
 ---
 
@@ -185,6 +226,7 @@ The obfuscator uses a **two-pass architecture**:
 
 Reads **every** input file and builds a single shared mapping of all sensitive values found across the entire cluster:
 
+**For log files:**
 1. Each JSON log line is parsed and recursively walked (`deep_discover`)
 2. Every attribute key is checked against categorized key sets (host keys, database keys, shard keys, etc.)
 3. Values are classified and registered in one shared `ObfuscatorRegistry`
@@ -192,32 +234,45 @@ Reads **every** input file and builds a single shared mapping of all sensitive v
 5. Embedded BSON documents in stringified form are parsed for key-value pairs
 6. Non-JSON lines (legacy format) are scanned with full regex patterns
 
+**For FTDC files:**
+1. Sequential BSON documents are decoded from the binary file
+2. Metadata documents have their `doc` field recursively walked (`deep_discover_bson`)
+3. Metric chunks are decompressed and the reference BSON document is walked
+4. Periodic metadata documents have their `doc` field walked
+5. BSON arrays (e.g., `hosts: ["node1:27017", "node2:27017"]`) are handled natively
+
 ### Pass 2 — Replacement (all files)
 
-Re-reads **every** file and performs string replacement using the shared mapping:
+Re-reads **every** file and performs replacement using the shared mapping:
 
+**For log files:**
 1. All replacements are sorted longest-first to prevent partial matches
-2. Each line in each file is scanned for every known original value and replaced with its obfuscated counterpart
-3. Each file's output is written to its own `*_obfuscated.log`
+2. Each line is scanned for every known original value and replaced
+3. Output is written to `*_obfuscated.log`
+
+**For FTDC files:**
+1. Each BSON document is decoded, string values are replaced, and the document is re-encoded
+2. Metric chunks are decompressed, the reference document is obfuscated, and the chunk is re-compressed with the identical delta stream
+3. Output files keep their original names
 
 ---
 
 ## Cross-File Coherence
 
-When processing multiple files, the tool guarantees **consistent replacements across all files**. This is critical for cluster diagnostics where the same hostname, shard name, or replica set name appears in logs from different nodes.
+When processing multiple files, the tool guarantees **consistent replacements across all files** — both logs and FTDC. This is critical for cluster diagnostics where the same hostname, shard name, or replica set name appears in logs from different nodes and in FTDC diagnostic data.
 
 The mechanism is simple: Pass 1 scans **all** files into **one** `ObfuscatorRegistry` before any replacement happens. Then Pass 2 applies that single registry to every file.
 
 For example, given a 3-node replica set + 1 mongos:
 
-| Original value | Replacement | node1.log | node2.log | node3.log | mongos.log |
+| Original value | Replacement | node1.log | node2.log | node1 FTDC | mongos.log |
 |---|---|---|---|---|---|
 | `mongo-pay-01.fintech.internal` | `host1.example.com` | `host1.example.com` | `host1.example.com` | `host1.example.com` | `host1.example.com` |
 | `rs-payments` | `replset1` | `replset1` | - | `replset1` | `replset1` |
 | `shard-payments` | `shard1` | - | - | - | `shard1` |
 | `payments_prod` | `database1` | `database1` | `database1` | - | - |
 
-The same original value always produces the same replacement, regardless of which file it appears in.
+The same original value always produces the same replacement, regardless of which file or file type it appears in.
 
 ---
 
@@ -257,6 +312,7 @@ These values are intentionally preserved because they are operational metadata, 
 | **System collections** | `system.sessions`, `system.profile` | MongoDB internal collections |
 | **Log envelope fields** | `t`, `s`, `c`, `id`, `ctx`, `svc` | Structural log metadata |
 | **Numeric metrics** | `durationMillis`, `docsExamined`, `keysExamined` | Performance data |
+| **FTDC numeric time series** | All delta-compressed metrics | Preserved byte-for-byte |
 | **Version strings** | `gitVersion`, `openSSLVersion` | Software versions |
 | **Numbers** | `42`, `3.14`, `-1` | Pure numeric values |
 | **Hex strings** | `507f1f77bcf86cd799439011` | ObjectIds, hashes (24+ hex chars) |
@@ -300,12 +356,12 @@ Each category uses a deterministic template that increments per unique value:
 
 The obfuscator recognizes **130+** MongoDB LOGV2 attribute keys, derived from analysis of all 2,233 unique attribute keys in the Percona Server for MongoDB 8.0 source code (`"keyName"_attr` patterns in `src/mongo/`).
 
-### Hosts & Network (HOST_KEYS -- 33 keys)
+### Hosts & Network (HOST_KEYS)
 
 Attribute keys whose values contain hostname, host:port, or IP address data:
 
 ```
-host, hostAndPort, hostName,
+host, hostAndPort, hostName, me,
 syncSource, syncSourceHost, syncSourceCandidate,
 candidateNode, candidate, peer,
 newSyncSource, oldSyncSource, previousSyncSource,
@@ -322,14 +378,14 @@ target, cursorHost,
 failedHost, sniName
 ```
 
-### Remote/Local Connections (REMOTE_LOCAL_KEYS -- 7 keys)
+### Remote/Local Connections (REMOTE_LOCAL_KEYS)
 
 ```
 remote, local, remoteAddr, remoteSocketAddress,
 remoteString, remoteAddress, sourceClient
 ```
 
-### Client (CLIENT_KEYS -- 1 key)
+### Client (CLIENT_KEYS)
 
 ```
 client
@@ -337,7 +393,7 @@ client
 
 Values matching `conn\d+` (connection IDs) are skipped.
 
-### Namespaces (NAMESPACE_KEYS -- 25 keys)
+### Namespaces (NAMESPACE_KEYS)
 
 Attribute keys whose values contain `database.collection` namespace strings:
 
@@ -355,7 +411,7 @@ configSettingsNamespace, affectedNamespaces,
 dbNss, docNss
 ```
 
-### Databases (DATABASE_KEYS -- 4 keys)
+### Databases (DATABASE_KEYS)
 
 ```
 database, db, dbName, dbname
@@ -363,7 +419,7 @@ database, db, dbName, dbname
 
 Internal databases (`admin`, `local`, `config`, `$external`) are never obfuscated.
 
-### Collections (COLLECTION_KEYS -- 8 keys)
+### Collections (COLLECTION_KEYS)
 
 ```
 collection, coll, collName,
@@ -373,17 +429,17 @@ sourceCollection, defragmentCollection
 
 System collections (`system.*`, `$*`) are never obfuscated.
 
-### Replica Set Names (REPLSET_KEYS -- 11 keys)
+### Replica Set Names (REPLSET_KEYS)
 
 ```
 replSetName, setName, configServerSetName,
-replicaSet,
+replicaSet, set,
 newConfigSetName, oldConfigSetName, localConfigSetName,
 commandLineSetName, ourSetName, initiateSetName,
 remoteNodeSetName
 ```
 
-### Shard Names/IDs (SHARD_KEYS -- 16 keys)
+### Shard Names/IDs (SHARD_KEYS)
 
 ```
 shard, shardId,
@@ -395,7 +451,7 @@ dataShard, mergingShardId,
 firstShardId, secondShardId
 ```
 
-### Users (USER_KEYS -- 3 keys)
+### Users (USER_KEYS)
 
 ```
 user, userName, queryUser
@@ -403,7 +459,7 @@ user, userName, queryUser
 
 Values containing `@` are treated as emails; others as usernames.
 
-### File Paths (PATH_KEYS -- 21 keys)
+### File Paths (PATH_KEYS)
 
 ```
 dbPath, dbpath, path, filePath, filepath,
@@ -417,7 +473,7 @@ lockFile, jsonConfigPath, remoteDBPath,
 _pipeAbsolutePath
 ```
 
-### Certificate Subjects (CERT_SUBJECT_KEYS -- 6 keys)
+### Certificate Subjects (CERT_SUBJECT_KEYS)
 
 ```
 peerSubject, peerSubjectName, subjectName,
@@ -426,7 +482,7 @@ subject, issuer, dn
 
 Certificate DN strings are parsed to also extract Organization (O=, OU=), Location (L=, ST=), and CN hostnames.
 
-### Connection Strings (CONN_STRING_KEYS -- 12 keys)
+### Connection Strings (CONN_STRING_KEYS)
 
 ```
 targetClusterConnectionString, connString, connectionString,
@@ -438,13 +494,13 @@ uri, mongoUri, ldapurl
 
 Connection strings are parsed to extract hosts, database names, and `replicaSet=` query parameters. Non-MongoDB URIs (ldap://, etc.) are also parsed for host extraction.
 
-### Application Names (APP_NAME_KEYS -- 2 keys)
+### Application Names (APP_NAME_KEYS)
 
 ```
 appName, clientName
 ```
 
-### Free-Text Fields (FREETEXT_KEYS -- 11 keys)
+### Free-Text Fields (FREETEXT_KEYS)
 
 ```
 msg, error, errmsg, reason, message, info,
@@ -453,16 +509,17 @@ errorMessage, errorMsg, err_msg, description, desc
 
 These are scanned with regex patterns for embedded IPs, FQDNs, emails, LDAP DN components, Java class names, and BSON key-value pairs.
 
-### Host Lists (HOST_LIST_KEYS -- 6 keys)
+### Host Lists (HOST_LIST_KEYS)
 
 ```
 addresses, failedHosts, nodes, configServers,
-listenAddrs, attemptedHosts
+listenAddrs, attemptedHosts,
+hosts, passives, arbiters, advisoryHostFQDNs
 ```
 
-Values are split on commas and each part is processed as a host.
+Values are split on commas (log files) or iterated as BSON arrays (FTDC files), and each part is processed as a host.
 
-### Skip Keys (SKIP_KEYS -- 31 keys)
+### Skip Keys (SKIP_KEYS)
 
 Keys that are **never processed** (structural/numeric metadata):
 
@@ -532,37 +589,44 @@ IPs, FQDNs, emails, LDAP DNs, and Java class names are extracted via regex.
 ### Multi-file processing flow
 
 ```
-  node1.log   node2.log   node3.log   mongos.log
-      │           │           │           │
-      └───────────┴─────┬─────┴───────────┘
-                        │
-                 PASS 1: Discovery
-            (scan ALL files into ONE registry)
-                        │
-           ┌────────────▼────────────┐
-           │   ObfuscatorRegistry    │
-           │      (shared)           │
-           │                         │
-           │  hostname:  {orig: repl}│
-           │  fqdn:      {orig: repl}│
-           │  ip:        {orig: repl}│
-           │  shard:     {orig: repl}│
-           │  replset:   {orig: repl}│
-           │  ...17 categories total │
-           └────────────┬────────────┘
-                        │
-                 PASS 2: Replace
-            (apply shared registry to ALL files)
-                        │
-      ┌───────────┬─────┴─────┬───────────┐
-      │           │           │           │
-      ▼           ▼           ▼           ▼
-  node1_ob..  node2_ob..  node3_ob..  mongos_ob..
+  node1/              node2/              mongos/
+  mongod.log          mongod.log          mongos.log
+  diagnostic.data/    diagnostic.data/    diagnostic.data/
+      metrics.*           metrics.*           metrics.*
+      │                   │                   │
+      └───────────────────┴─────┬─────────────┘
+                                │
+                         PASS 1: Discovery
+                    (scan ALL files into ONE registry)
+                                │
+               ┌────────────────▼────────────────┐
+               │       ObfuscatorRegistry        │
+               │           (shared)              │
+               │                                 │
+               │  hostname:  {orig: repl}        │
+               │  fqdn:      {orig: repl}        │
+               │  ip:        {orig: repl}        │
+               │  shard:     {orig: repl}        │
+               │  replset:   {orig: repl}        │
+               │  ...17 categories total         │
+               └────────────────┬────────────────┘
+                                │
+                         PASS 2: Replace
+                    (apply shared registry to ALL)
+                                │
+      ┌─────────────────────────┼─────────────────────────┐
+      │                         │                         │
+      ▼                         ▼                         ▼
+  obfuscated/               obfuscated/               obfuscated/
+  node1/                    node2/                    mongos/
+  mongod_obfuscated.log     mongod_obfuscated.log     mongos_obfuscated.log
+  diagnostic.data/          diagnostic.data/          diagnostic.data/
+      metrics.*                 metrics.*                 metrics.*
 
-                  + cluster_mapping.json
+                      + cluster_mapping.json
 ```
 
-### Per-file discovery flow
+### Per-file discovery flow (log files)
 
 ```
            ┌────────────────────────┐
@@ -594,18 +658,36 @@ IPs, FQDNs, emails, LDAP DNs, and Java class names are extracted via regex.
            └─────────────────────────┘
 ```
 
+### Per-file discovery flow (FTDC files)
+
+```
+           ┌─────────────────────────────┐
+           │  decode BSON documents       │
+           │  from binary file            │
+           └────────────┬────────────────┘
+                        │
+           ┌────────────▼────────────────┐
+           │  For each FTDC document:    │
+           │    ├─ type 0 (metadata)?    │──→ deep_discover_bson(doc)
+           │    ├─ type 1 (metric)?      │──→ decompress chunk
+           │    │                        │    extract reference BSON
+           │    │                        │    deep_discover_bson(ref_doc)
+           │    └─ type 2 (periodic)?    │──→ deep_discover_bson(doc)
+           └─────────────────────────────┘
+```
+
 ---
 
 ## Deployment Coverage
 
 Coverage is based on analysis of all 2,233 LOGV2 attribute keys in the Percona Server for MongoDB 8.0 source code.
 
-| Deployment Type | Coverage | Notes |
-|----------------|----------|-------|
-| **Standalone** | ~98% | Covers connections, auth, commands, paths, TLS, LDAP |
-| **Replica Set** | ~98% | Covers member hosts, sync sources, elections, heartbeats, configs |
-| **Sharded Cluster** | ~98% | Covers shard IDs, chunk migrations, resharding, balancer, config servers, mongos routing |
-| **Legacy text logs** | ~90% | Regex-based -- catches IPs, FQDNs, emails; may miss short hostnames in unstructured text |
+| Deployment Type | Log Coverage | FTDC Coverage | Notes |
+|----------------|-------------|---------------|-------|
+| **Standalone** | ~98% | ~98% | Covers connections, auth, commands, paths, TLS, LDAP |
+| **Replica Set** | ~98% | ~98% | Covers member hosts, sync sources, elections, heartbeats, configs |
+| **Sharded Cluster** | ~98% | ~98% | Covers shard IDs, chunk migrations, resharding, balancer, config servers, mongos routing |
+| **Legacy text logs** | ~90% | N/A | Regex-based -- catches IPs, FQDNs, emails; may miss short hostnames in unstructured text |
 
 ---
 
@@ -650,14 +732,12 @@ Embedded BSON documents within free-text fields (like oplog entries in error mes
 
 3. **String replacement**: Replacement is done via simple `str.replace()`, not JSON-aware. In rare cases, a short sensitive value could match a substring in an unrelated context. Longest-first ordering mitigates this.
 
-4. **Depth limit**: Nested JSON structures are walked to a maximum depth of 20. Extremely deep nesting beyond this limit will not be processed.
+4. **Depth limit**: Nested JSON/BSON structures are walked to a maximum depth of 20. Extremely deep nesting beyond this limit will not be processed.
 
 5. **FQDN heuristics**: The FQDN regex filters out entries starting with digits, containing uppercase characters, having more than 4 parts, or matching known non-domains. Some edge-case FQDNs may be missed.
 
 6. **Short hostnames in unknown keys**: For attribute keys not in any recognized set, the fallback light scan only triggers full freetext analysis if an IP, email, or FQDN pattern is detected. A bare short hostname (e.g., `"mykey": "prodserver"`) in an unrecognized key will not be caught.
 
-7. **No binary/FTDC support**: Only handles text-based logs (structured JSON and legacy text). Binary diagnostic data (FTDC) is not supported.
+7. **Connection string passwords**: If a MongoDB connection string contains embedded credentials (`mongodb://user:password@host/db`), the password portion is not explicitly handled. The host and database portions are obfuscated, but password handling should rely on MongoDB's own log redaction (`--redactClientLogData`).
 
-8. **Connection string passwords**: If a MongoDB connection string contains embedded credentials (`mongodb://user:password@host/db`), the password portion is not explicitly handled. The host and database portions are obfuscated, but password handling should rely on MongoDB's own log redaction (`--redactClientLogData`).
-
-9. **No incremental/append mode**: There is no way to load a previous mapping and continue from it. If you receive additional log files from the same cluster later, you would need to re-process all files together to maintain coherence.
+8. **FTDC schema preservation**: When obfuscating FTDC metric chunks, the reference document's field structure (names, types, order) must not change — only string values are modified. This is guaranteed by the current implementation, but adding/removing fields would break the delta stream alignment.
