@@ -45,7 +45,7 @@ This means you can still correlate events across nodes, trace replication chains
 
 ```bash
 # Point at a support bundle / cluster dump folder — it does the rest
-python3 mongodb_obfuscator.py /path/to/CS0059344/
+python3 mongodb_obfuscator.py /path/to/logs/
 
 # Custom output directory
 python3 mongodb_obfuscator.py /path/to/cluster_dump/ -o /sanitized/
@@ -67,12 +67,12 @@ The tool recursively scans the input directory for `.log` files and FTDC files (
 Point at the root of a support bundle or cluster dump. The tool recursively finds all log and FTDC files:
 
 ```bash
-python3 mongodb_obfuscator.py /path/to/CS0059344/
+python3 mongodb_obfuscator.py /path/to/logs/
 ```
 
 Input structure:
 ```
-CS0059344/
+logs/
     mongod-0.log
     diagnostic.data/
         diagnostic.data/
@@ -83,7 +83,7 @@ CS0059344/
 
 Output (inside `obfuscated/` subdirectory, originals untouched):
 ```
-CS0059344/
+logs/
     mongod-0.log                          <-- original, untouched
     diagnostic.data/                      <-- original, untouched
         ...
